@@ -82,6 +82,14 @@ jobs:
         run: |
           cp ci/configs/*.config kernel/arch/arm64/configs/vendor/feature/
 
+      - name: Shorten kernel version string
+        working-directory: kernel
+        run: |
+          # vendor/common.config enables LOCALVERSION_AUTO, which appends
+          # "-g<hash>-dirty" (the tree is dirty after our changes) and pushes
+          # the release string past the 64-char limit. .scmversion overrides it.
+          printf -- '-bakasu' > .scmversion
+
       - name: Configure kernel
         working-directory: kernel
         run: |
