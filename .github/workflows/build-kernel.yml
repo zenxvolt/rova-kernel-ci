@@ -1,0 +1,164 @@
+name: Build kernel (rova - BakaSU + Droidspaces)
+
+# Standalone CI repo: it does NOT live inside the kernel repo.
+# It checks out the kernel source (upstream or your fork), swaps the bundled
+# KernelSU-Next + SUSFS for BakaSU, adds Droidspaces options, builds, and
+# publishes a flashable AnyKernel3 zip as an artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: "Kernel repo (owner/name). Upstream or your fork."
+        required: true
+        default: "crdroidandroid/android_kernel_xiaomi_rova"
+      kernel_branch:
+        description: "Kernel branch (15.0 = Android 15)"
+        required: true
+        default: "15.0"
+      bakasu_ref:
+        description: "BakaSU branch or tag"
+        required: true
+        default: "main"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      ARCH: arm64
+      BAKASU_REF: ${{ inputs.bakasu_ref }}
+
+    steps:
+      - name: Checkout CI files (this repo)
+        uses: actions/checkout@v4
+        with:
+          path: ci
+
+      # Public repos work with the default token. For a PRIVATE kernel fork,
+      # add a repo secret KERNEL_REPO_TOKEN (PAT with read access to it).
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.kernel_repo }}
+          ref: ${{ inputs.kernel_branch }}
+          token: ${{ secrets.KERNEL_REPO_TOKEN || github.token }}
+          path: kernel
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang lld llvm flex bison bc cpio zip xz-utils python3 git curl \
+            libssl-dev libelf-dev \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
+          clang --version | head -n1
+
+      - name: Replace bundled KernelSU with BakaSU
+        working-directory: kernel
+        run: |
+          set -eux
+          # Old bundled KernelSU-Next (SUSFS Kconfig lives inside it)
+          rm -rf techpack/KernelSU
+          sed -i '\#techpack/KernelSU/kernel/Kconfig#d' techpack/Kconfig
+          # BakaSU's own setup script: clones ./KernelSU, symlinks
+          # drivers/kernelsu and wires drivers/Makefile + drivers/Kconfig.
+          curl -fsSL "https://raw.githubusercontent.com/Baka-SU/BakaSU/${BAKASU_REF}/kernel/setup.sh" -o "$RUNNER_TEMP/bakasu-setup.sh"
+          sh "$RUNNER_TEMP/bakasu-setup.sh" "${BAKASU_REF}"
+          ls -l drivers/kernelsu
+          git -C KernelSU log -1 --format='BakaSU commit: %h %s'
+
+      - name: Apply patches
+        working-directory: kernel
+        run: |
+          set -eux
+          for p in "$GITHUB_WORKSPACE"/ci/patches/*.patch; do
+            echo "== applying $p"
+            git apply --whitespace=nowarn "$p"
+          done
+
+      - name: Add config fragments
+        run: |
+          cp ci/configs/*.config kernel/arch/arm64/configs/vendor/feature/
+
+      - name: Configure kernel
+        working-directory: kernel
+        run: |
+          set -eux
+          # Same list as iusmac's device_rova 15-dev BoardConfig.mk, except the
+          # two bundled-KSU fragments (ksu_static_hooks / ksu_susfs) are
+          # replaced by bakasu.config, and droidspaces.config is added last.
+          make O=out LLVM=1 CC=clang \
+            CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            vendor/msm8937-perf_defconfig \
+            vendor/msm8937-legacy.config \
+            vendor/common.config \
+            vendor/debugfs.config \
+            vendor/feature/android-12.config \
+            vendor/feature/exfat.config \
+            vendor/feature/ntfs.config \
+            vendor/feature/kprobes.config \
+            vendor/feature/lmkd.config \
+            vendor/feature/wireguard.config \
+            vendor/xiaomi/msm8937/common.config \
+            vendor/xiaomi/msm8937/mi8917.config \
+            vendor/feature/pocket-judge.config \
+            vendor/feature/net.config \
+            vendor/feature/bakasu.config \
+            vendor/feature/droidspaces.config
+
+      - name: Verify final .config
+        working-directory: kernel
+        run: |
+          fail=0
+          for s in KSU KSU_MANUAL_HOOK KALLSYMS_ALL PID_NS UTS_NS IPC_NS USER_NS NET_NS \
+                   SYSVIPC CGROUP_DEVICE CGROUP_PIDS MEMCG DEVTMPFS OVERLAY_FS \
+                   VETH BRIDGE NF_NAT SECCOMP_FILTER; do
+            if grep -q "^CONFIG_${s}=y" out/.config; then
+              echo "ok      CONFIG_${s}"
+            else
+              echo "MISSING CONFIG_${s}"; fail=1
+            fi
+          done
+          if grep -q '^CONFIG_KSU_SUSFS=y' out/.config; then
+            echo "CONFIG_KSU_SUSFS must be off with BakaSU manual hook"; fail=1
+          fi
+          grep -q '^CONFIG_ANDROID_PARANOID_NETWORK=y' out/.config && { echo "ANDROID_PARANOID_NETWORK is on"; fail=1; }
+          exit $fail
+
+      - name: Build Image.gz-dtb
+        working-directory: kernel
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" O=out LLVM=1 CC=clang \
+            CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            Image.gz-dtb 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          ls -l out/arch/arm64/boot/Image.gz-dtb
+
+      - name: Package AnyKernel3 zip
+        run: |
+          set -eux
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AnyKernel3
+          rm -rf AnyKernel3/.git AnyKernel3/.github AnyKernel3/README.md
+          cp ci/anykernel/anykernel.sh AnyKernel3/anykernel.sh
+          cp kernel/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+          ZIP="rova-bakasu-droidspaces-$(date +%Y%m%d-%H%M).zip"
+          (cd AnyKernel3 && zip -r9 "$GITHUB_WORKSPACE/$ZIP" . -x '*.placeholder')
+          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+
+      - name: Upload flashable zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: rova-kernel-zip
+          path: ${{ env.ZIP }}
+
+      - name: Upload build log and .config
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-and-config
+          path: |
+            build.log
+            kernel/out/.config
+          if-no-files-found: ignore
