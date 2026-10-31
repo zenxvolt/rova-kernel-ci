@@ -20,6 +20,11 @@ on:
         description: "BakaSU branch or tag"
         required: true
         default: "main"
+      systemd_backports:
+        description: "Apply the systemd 258-262 kernel backports + options (untick to isolate a build problem)"
+        type: boolean
+        required: true
+        default: true
 
 jobs:
   build:
@@ -28,6 +33,7 @@ jobs:
     env:
       ARCH: arm64
       BAKASU_REF: ${{ inputs.bakasu_ref }}
+      SYSTEMD_BACKPORTS: ${{ inputs.systemd_backports }}
 
     steps:
       - name: Checkout CI files (this repo)
@@ -72,11 +78,30 @@ jobs:
       - name: Apply patches
         working-directory: kernel
         run: |
-          set -eux
-          for p in "$GITHUB_WORKSPACE"/ci/patches/*.patch; do
-            echo "== applying $p"
-            git apply --whitespace=nowarn "$p"
-          done
+          set -eu
+          apply_dir() {
+            for p in "$1"/*.patch; do
+              if git apply --check --whitespace=nowarn "$p" 2>/dev/null; then
+                git apply --whitespace=nowarn "$p"
+                echo "applied  $(basename "$p")"
+              elif git apply -R --check --whitespace=nowarn "$p" 2>/dev/null; then
+                # e.g. the kernel repo gained this change upstream
+                echo "already present, skipped  $(basename "$p")"
+              else
+                echo "::error::patch does not apply: $(basename "$p")"
+                git apply --check --whitespace=nowarn "$p" || true
+                exit 1
+              fi
+            done
+          }
+          echo "== core patches (BakaSU hooks, Droidspaces cgroup)"
+          apply_dir "$GITHUB_WORKSPACE/ci/patches"
+          if [ "$SYSTEMD_BACKPORTS" = "true" ]; then
+            echo "== systemd 258-262 backports (droidspaces-backports, 4.19 series)"
+            apply_dir "$GITHUB_WORKSPACE/ci/patches/systemd"
+          else
+            echo "== systemd backports disabled by input"
+          fi
 
       - name: Add config fragments
         run: |
@@ -96,33 +121,45 @@ jobs:
           set -eux
           # Same list as iusmac's device_rova 15-dev BoardConfig.mk, except the
           # two bundled-KSU fragments (ksu_static_hooks / ksu_susfs) are
-          # replaced by bakasu.config, and droidspaces.config is added last.
+          # replaced by bakasu.config; droidspaces.config (and systemd.config
+          # when enabled) are added last so they override the base defconfig.
+          FRAGS=(
+            vendor/msm8937-perf_defconfig
+            vendor/msm8937-legacy.config
+            vendor/common.config
+            vendor/debugfs.config
+            vendor/feature/android-12.config
+            vendor/feature/exfat.config
+            vendor/feature/ntfs.config
+            vendor/feature/kprobes.config
+            vendor/feature/lmkd.config
+            vendor/feature/wireguard.config
+            vendor/xiaomi/msm8937/common.config
+            vendor/xiaomi/msm8937/mi8917.config
+            vendor/feature/pocket-judge.config
+            vendor/feature/net.config
+            vendor/feature/bakasu.config
+            vendor/feature/droidspaces.config
+          )
+          if [ "$SYSTEMD_BACKPORTS" = "true" ]; then
+            FRAGS+=( vendor/feature/systemd.config )
+          fi
           make O=out LLVM=1 CC=clang \
             CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-            vendor/msm8937-perf_defconfig \
-            vendor/msm8937-legacy.config \
-            vendor/common.config \
-            vendor/debugfs.config \
-            vendor/feature/android-12.config \
-            vendor/feature/exfat.config \
-            vendor/feature/ntfs.config \
-            vendor/feature/kprobes.config \
-            vendor/feature/lmkd.config \
-            vendor/feature/wireguard.config \
-            vendor/xiaomi/msm8937/common.config \
-            vendor/xiaomi/msm8937/mi8917.config \
-            vendor/feature/pocket-judge.config \
-            vendor/feature/net.config \
-            vendor/feature/bakasu.config \
-            vendor/feature/droidspaces.config
+            "${FRAGS[@]}"
 
       - name: Verify final .config
         working-directory: kernel
         run: |
           fail=0
-          for s in KSU KSU_MANUAL_HOOK KALLSYMS_ALL PID_NS UTS_NS IPC_NS USER_NS NET_NS \
-                   SYSVIPC CGROUP_DEVICE CGROUP_PIDS MEMCG DEVTMPFS OVERLAY_FS \
-                   VETH BRIDGE NF_NAT SECCOMP_FILTER; do
+          WANT="KSU KSU_MANUAL_HOOK KALLSYMS_ALL PID_NS UTS_NS IPC_NS USER_NS NET_NS \
+                SYSVIPC CGROUP_DEVICE CGROUP_PIDS MEMCG DEVTMPFS OVERLAY_FS \
+                VETH BRIDGE NF_NAT SECCOMP_FILTER \
+                MACVLAN IPV6 IP6_NF_NAT IP6_NF_TARGET_MASQUERADE NF_NAT_IPV6"
+          if [ "$SYSTEMD_BACKPORTS" = "true" ]; then
+            WANT="$WANT FHANDLE CRYPTO_USER_API_HASH AUTOFS_FS"
+          fi
+          for s in $WANT; do
             if grep -q "^CONFIG_${s}=y" out/.config; then
               echo "ok      CONFIG_${s}"
             else
