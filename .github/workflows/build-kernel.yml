@@ -140,6 +140,7 @@ jobs:
             vendor/feature/net.config
             vendor/feature/bakasu.config
             vendor/feature/droidspaces.config
+            vendor/feature/anland.config
           )
           if [ "$SYSTEMD_BACKPORTS" = "true" ]; then
             FRAGS+=( vendor/feature/systemd.config )
@@ -155,7 +156,8 @@ jobs:
           WANT="KSU KSU_MANUAL_HOOK KALLSYMS_ALL PID_NS UTS_NS IPC_NS USER_NS NET_NS \
                 SYSVIPC CGROUP_DEVICE CGROUP_PIDS MEMCG DEVTMPFS OVERLAY_FS \
                 VETH BRIDGE NF_NAT SECCOMP_FILTER \
-                MACVLAN IPV6 IP6_NF_NAT IP6_NF_TARGET_MASQUERADE NF_NAT_IPV6"
+                MACVLAN IPV6 IP6_NF_NAT IP6_NF_TARGET_MASQUERADE NF_NAT_IPV6 \
+                DRM DRM_VGEM"
           if [ "$SYSTEMD_BACKPORTS" = "true" ]; then
             WANT="$WANT FHANDLE CRYPTO_USER_API_HASH AUTOFS_FS"
           fi
