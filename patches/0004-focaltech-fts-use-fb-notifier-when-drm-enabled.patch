@@ -1,0 +1,77 @@
+input: focaltech: use the fb notifier path when DRM is enabled without panel notifier
+
+The FTS driver chooses its suspend/resume hook with "#if defined(CONFIG_DRM)",
+which assumes the Qualcomm panel_event_notifier API
+(<linux/soc/qcom/panel_event_notifier.h>). That API does not exist in this
+kernel tree (CONFIG_QCOM_PANEL_EVENT_NOTIFIER is not available).
+
+As long as CONFIG_DRM was off this was invisible: the driver fell through to
+the "#elif defined(CONFIG_FB)" branch. Enabling CONFIG_DRM (needed for the
+vgem render node used by Anland) flips it onto the missing API and the build
+stops with:
+
+  focaltech_core.c: error: conflicting types for 'fts_ts_panel_notifier_callback'
+  focaltech_core.c: error: variable has incomplete type 'enum panel_event_notifier_tag'
+  focaltech_core.c: error: incomplete definition of type 'struct panel_event_notification'
+
+Require CONFIG_QCOM_PANEL_EVENT_NOTIFIER as well, so the framebuffer-notifier
+branch keeps being used exactly as before.
+
+diff --git a/techpack/xiaomi-msm8937/touchscreen/focaltech_touch/focaltech_core.c b/techpack/xiaomi-msm8937/touchscreen/focaltech_touch/focaltech_core.c
+index 6adeb8024..470cb4413 100644
+--- a/techpack/xiaomi-msm8937/touchscreen/focaltech_touch/focaltech_core.c
++++ b/techpack/xiaomi-msm8937/touchscreen/focaltech_touch/focaltech_core.c
+@@ -43,7 +43,7 @@
+ #ifdef CONFIG_QCOM_PANEL_EVENT_NOTIFIER
+ #include <linux/soc/qcom/panel_event_notifier.h>
+ #endif
+-#if defined(CONFIG_DRM)
++#if defined(CONFIG_DRM) && defined(CONFIG_QCOM_PANEL_EVENT_NOTIFIER)
+ #include <drm/drm_panel.h>
+ #elif defined(CONFIG_FB)
+ #include <linux/notifier.h>
+@@ -101,7 +101,7 @@
+ *****************************************************************************/
+ struct fts_ts_data *fts_data;
+ 
+-#if defined(CONFIG_DRM)
++#if defined(CONFIG_DRM) && defined(CONFIG_QCOM_PANEL_EVENT_NOTIFIER)
+ static struct drm_panel *active_panel;
+ static void fts_ts_panel_notifier_callback(enum panel_event_notifier_tag tag,
+ 		 struct panel_event_notification *event, void *client_data);
+@@ -2889,7 +2889,7 @@ static int fts_parse_dt(struct device *dev, struct fts_ts_platform_data *pdata)
+ 	return 0;
+ }
+ 
+-#if defined(CONFIG_DRM)
++#if defined(CONFIG_DRM) && defined(CONFIG_QCOM_PANEL_EVENT_NOTIFIER)
+ static void fts_resume_work(struct work_struct *work)
+ {
+ 	struct fts_ts_data *ts_data = container_of(work, struct fts_ts_data,
+@@ -3297,7 +3297,7 @@ static int fts_ts_probe_entry(struct fts_ts_data *ts_data)
+ 	}
+ #endif
+ 
+-#if defined(CONFIG_DRM)
++#if defined(CONFIG_DRM) && defined(CONFIG_QCOM_PANEL_EVENT_NOTIFIER)
+ 	if (ts_data->ts_workqueue)
+ 		INIT_WORK(&ts_data->resume_work, fts_resume_work);
+ 
+@@ -3421,7 +3421,7 @@ static int fts_ts_remove_entry(struct fts_ts_data *ts_data)
+ 	if (ts_data->ts_workqueue)
+ 		destroy_workqueue(ts_data->ts_workqueue);
+ 
+-#if defined(CONFIG_DRM)
++#if defined(CONFIG_DRM) && defined(CONFIG_QCOM_PANEL_EVENT_NOTIFIER)
+ 	if (active_panel && ts_data->notifier_cookie)
+ 		panel_event_notifier_unregister(ts_data->notifier_cookie);
+ 
+@@ -3658,7 +3658,7 @@ static int fts_ts_resume(struct device *dev)
+ *****************************************************************************/
+ static int fts_ts_check_dt(struct device_node *np)
+ {
+-#if defined(CONFIG_DRM)
++#if defined(CONFIG_DRM) && defined(CONFIG_QCOM_PANEL_EVENT_NOTIFIER)
+ 	int i;
+ 	int count;
+ 	struct device_node *node;

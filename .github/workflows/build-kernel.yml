@@ -183,8 +183,18 @@ jobs:
           # does not declare them as dependencies, so generate them first to
           # avoid a race with the parallel build.
           $MK security/selinux/ init/version.o 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
-          $MK Image.gz-dtb 2>&1 | tee -a "$GITHUB_WORKSPACE/build.log"
+          # -k: keep going after an error so that ONE run lists every failing
+          # file instead of only the first one.
+          $MK -k Image.gz-dtb 2>&1 | tee -a "$GITHUB_WORKSPACE/build.log"
           ls -l out/arch/arm64/boot/Image.gz-dtb
+
+      - name: Summarize compile errors
+        if: failure()
+        run: |
+          echo "### Compile errors" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -E ' error: |\*\*\* \[' build.log | sort -u | head -n 60 >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Package AnyKernel3 zip
         run: |
@@ -208,6 +218,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-log-and-config
+          # kernel/out/.config is a hidden file; upload-artifact skips those by default.
+          include-hidden-files: true
           path: |
             build.log
             kernel/out/.config
