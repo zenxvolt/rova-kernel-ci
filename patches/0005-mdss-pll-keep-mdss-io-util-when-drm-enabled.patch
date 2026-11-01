@@ -1,0 +1,36 @@
+clk: mdss-pll: keep mdss_io_util.h when the fbdev MDSS driver is used
+
+drivers/clk/qcom/mdss/mdss-pll.h picks its I/O helper header with
+"#if defined(CONFIG_DRM)": sde_io_util.h for the SDE/DRM display stack,
+mdss_io_util.h otherwise. The two headers define struct dss_vreg and
+struct dss_clk differently (mdss_io_util.h has load[], lp_disable_allowed,
+disabled in dss_vreg; sde_io_util.h has max_rate in dss_clk).
+
+This device uses the fbdev MDSS display driver (CONFIG_FB_MSM_MDSS), and the
+msm_dss_*() helpers the PLL driver calls (msm_dss_enable_vreg(),
+msm_dss_config_vreg(), msm_dss_enable_clk(), ...) are the ones built from
+drivers/video/fbdev/msm/mdss_io_util.c, i.e. the mdss layout.
+
+With CONFIG_DRM=y (enabled only to get the vgem render node) the PLL driver
+was therefore compiled against the sde layout and handed arrays of the wrong
+element size to the mdss helpers. The DSI PLL rail/clock handling is wrong on
+every panel power cycle, so after the screen turns off it cannot be turned
+on again (power button and double-tap do nothing).
+
+Only use the sde header when DRM is enabled and the fbdev MDSS driver is not.
+
+diff --git a/drivers/clk/qcom/mdss/mdss-pll.h b/drivers/clk/qcom/mdss/mdss-pll.h
+index 5290c7cf9..4682ac6ad 100644
+--- a/drivers/clk/qcom/mdss/mdss-pll.h
++++ b/drivers/clk/qcom/mdss/mdss-pll.h
+@@ -12,9 +12,9 @@
+ #include "../clk-regmap.h"
+ #include "../clk-regmap-divider.h"
+ #include "../clk-regmap-mux.h"
+ 
+-#if defined(CONFIG_DRM)
++#if defined(CONFIG_DRM) && !defined(CONFIG_FB_MSM_MDSS)
+ #include <linux/sde_io_util.h>
+ #else
+ #include <linux/mdss_io_util.h>
+ #endif
